@@ -78,12 +78,6 @@ jobs:
       - name: List produced packages
         run: ls -la "${{ env.ARTIFACTS_DIR }}"
 
-      - name: Upload nupkg as workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: trovesuite-package-${{ steps.version.outputs.value }}
-          path: ${{ env.ARTIFACTS_DIR }}/*.nupkg
-
       - name: Add GitHub Packages NuGet source
         run: |
           dotnet nuget add source \
