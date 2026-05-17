@@ -1,0 +1,118 @@
+name: Publish to GitHub Packages
+
+# Publishes Trovesuite.Package to GitHub Packages (NuGet feed for this repo's owner).
+#
+# Triggers:
+#   - push of a tag matching v*  (e.g. v1.0.0)  -> publishes the version baked into the csproj
+#   - workflow_dispatch                          -> manual run; optionally override Version
+#
+# The version that ends up in the nupkg comes from <Version> in Trovesuite.Package.csproj,
+# unless you pass `version` to workflow_dispatch, in which case that wins (passed to /p:Version=...).
+#
+# GITHUB_TOKEN automatically has packages:write for the repo owner's NuGet feed, so no
+# extra PAT setup is needed for same-org pushes.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override <Version> from the csproj (e.g. 1.0.1). Leave blank to use the csproj value."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+  CONFIGURATION: Release
+  PROJECT_PATH: src/Trovesuite.Package/Trovesuite.Package.csproj
+  ARTIFACTS_DIR: artifacts/nuget
+
+jobs:
+  publish:
+    name: Pack & push Trovesuite.Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Show resolved version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "Using workflow_dispatch override: ${{ inputs.version }}"
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            CSPROJ_VERSION=$(grep -oPm1 '(?<=<Version>)[^<]+' "${{ env.PROJECT_PATH }}")
+            echo "Using csproj version: $CSPROJ_VERSION"
+            echo "value=$CSPROJ_VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore
+        run: dotnet restore "${{ env.PROJECT_PATH }}"
+
+      - name: Build
+        run: dotnet build "${{ env.PROJECT_PATH }}" --configuration "${{ env.CONFIGURATION }}" --no-restore
+
+      - name: Pack
+        run: |
+          dotnet pack "${{ env.PROJECT_PATH }}" \
+            --configuration "${{ env.CONFIGURATION }}" \
+            --no-build \
+            --output "${{ env.ARTIFACTS_DIR }}" \
+            -p:Version=${{ steps.version.outputs.value }}
+
+      - name: List produced packages
+        run: ls -la "${{ env.ARTIFACTS_DIR }}"
+
+      - name: Upload nupkg as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trovesuite-package-${{ steps.version.outputs.value }}
+          path: ${{ env.ARTIFACTS_DIR }}/*.nupkg
+
+      - name: Add GitHub Packages NuGet source
+        run: |
+          dotnet nuget add source \
+            --username "${{ github.repository_owner }}" \
+            --password "${{ secrets.GITHUB_TOKEN }}" \
+            --store-password-in-clear-text \
+            --name github \
+            "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
+      - name: Push to GitHub Packages
+        run: |
+          dotnet nuget push "${{ env.ARTIFACTS_DIR }}/*.nupkg" \
+            --source github \
+            --api-key "${{ secrets.GITHUB_TOKEN }}" \
+            --skip-duplicate
+
+      - name: Summary
+        run: |
+          {
+            echo "## Published Trovesuite.Package ${{ steps.version.outputs.value }}"
+            echo ""
+            echo "- Feed: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+            echo "- Trigger: \`${{ github.event_name }}\`"
+            echo "- Tag/ref: \`${{ github.ref }}\`"
+            echo ""
+            echo "Consume in another project:"
+            echo ""
+            echo '```bash'
+            echo "dotnet nuget add source --username <user> --password <PAT-with-read:packages> --store-password-in-clear-text --name github https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+            echo "dotnet add package Trovesuite.Package --version ${{ steps.version.outputs.value }} --source github"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
