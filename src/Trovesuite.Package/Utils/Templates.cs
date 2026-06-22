@@ -5,7 +5,7 @@ public static class Templates
     public const string OtpTextTemplate =
         "Your Trovesuite OTP code is: {otp_code}\n" +
         "Please do not share this code with anyone.\n" +
-        "This code will expire in 5 minutes.\n" +
+        "This code will expire in 1 minute.\n" +
         "Sent at: {cdate}, {ctime}";
 
     public const string OtpHtmlTemplate = """
@@ -23,7 +23,7 @@ public static class Templates
         </div>
       </div>
       <p style="font-size: 14px; color: #555;">
-        This code will expire in <b>5 minutes</b>. Please do not share this code with anyone.
+        This code will expire in <b>1 minute</b>. Please do not share this code with anyone.
       </p>
       <hr style="border: none; border-top: 1px solid #eee; margin: 25px 0;">
       <p style="font-size: 12px; color: #888; text-align: center;">
