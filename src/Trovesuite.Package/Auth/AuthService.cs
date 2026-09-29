@@ -348,16 +348,73 @@ public sealed class AuthService : IAuthService
         return set.ToList();
     }
 
+    /// <summary>The role that may do anything.</summary>
+    /// <remarks>
+    /// Checked by role, not by a wildcard permission row. The auto-assign trigger grants
+    /// Admin every permission inserted except log modification, so a "permission-all" row
+    /// would have made Admin omnipotent the moment it landed.
+    /// </remarks>
+    public const string OwnerRoleId = "role-owner";
+
+    /// <summary>An app's admin may do anything inside that app.</summary>
+    /// <remarks>
+    /// These roles already held every permission of their own app, kept complete by seeds
+    /// and triggers that have to be got right on every change. The role says it once.
+    /// </remarks>
+    private static readonly Dictionary<string, string> AppAdminRoles = new(StringComparer.Ordinal)
+    {
+        ["role-subscribed-app-msg-admin"] = "msg",
+        ["role-subscribed-app-loandrift-admin"] = "loandrift",
+        ["role-subscribed-app-zeloshr-admin"] = "zeloshr",
+    };
+
+    public static bool IsOwner(IEnumerable<AuthServiceReadDto> userRoles) =>
+        userRoles is not null && userRoles.Any(r =>
+            string.Equals(r.RoleId, OwnerRoleId, StringComparison.Ordinal));
+
+    /// <summary>Whether an app-admin role covers this permission.</summary>
+    /// <remarks>
+    /// Matched on the id's own prefix. Every permission of an app is named
+    /// permission-{app}-..., which ZelosHR's catalogue audit already asserts for its own,
+    /// and this package is only ever asked about ids.
+    ///
+    /// Anything to do with logs is excluded outright rather than by verb. The Python side
+    /// reads cp_actions to tell a read from a write; doing that here would mean a database
+    /// call inside a synchronous check, and a hand-written list of read verbs is exactly
+    /// the mistake that let `statistics` be treated as a write once already. Excluding the
+    /// whole family means an app admin never gains a log permission by being an admin --
+    /// reading one falls through to an explicit grant, which is the safe direction.
+    /// </remarks>
+    private static bool AppAdminAllows(IEnumerable<AuthServiceReadDto> userRoles, string required)
+    {
+        if (string.IsNullOrEmpty(required) || userRoles is null) return false;
+
+        foreach (var role in userRoles)
+        {
+            if (role.RoleId is null) continue;
+            if (!AppAdminRoles.TryGetValue(role.RoleId, out var app)) continue;
+
+            var prefix = $"permission-{app}-";
+            if (!required.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            if (required.Contains("-logs-", StringComparison.Ordinal)) continue;
+
+            return true;
+        }
+        return false;
+    }
+
     public bool HasAnyPermission(IEnumerable<AuthServiceReadDto> userRoles, IEnumerable<string> requiredPermissions)
     {
+        if (IsOwner(userRoles)) return true;
         var owned = new HashSet<string>(GetUserPermissions(userRoles), StringComparer.Ordinal);
-        return requiredPermissions.Any(owned.Contains);
+        return requiredPermissions.Any(p => owned.Contains(p) || AppAdminAllows(userRoles, p));
     }
 
     public bool HasAllPermissions(IEnumerable<AuthServiceReadDto> userRoles, IEnumerable<string> requiredPermissions)
     {
+        if (IsOwner(userRoles)) return true;
         var owned = new HashSet<string>(GetUserPermissions(userRoles), StringComparer.Ordinal);
-        return requiredPermissions.All(owned.Contains);
+        return requiredPermissions.All(p => owned.Contains(p) || AppAdminAllows(userRoles, p));
     }
 
     private ClaimsPrincipal ValidateToken(string token)

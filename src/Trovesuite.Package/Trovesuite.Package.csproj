@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <PackageId>Trovesuite.Package</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
     <Title>TroveSuite Package</Title>
     <Description>TroveSuite services package providing authentication, authorization, notifications, Azure Storage, and other enterprise services for TroveSuite applications. The package consumes an existing core_platform PostgreSQL schema — it does NOT create or migrate the database. Use tvs-sqlscript (EF Core migrations) to provision the schema before consumers start up.</Description>
     <PackageTags>authentication;authorization;notifications;jwt;trovesuite;security;tenant;permissions;enterprise;services;azure;storage;blob;cloud-storage</PackageTags>
