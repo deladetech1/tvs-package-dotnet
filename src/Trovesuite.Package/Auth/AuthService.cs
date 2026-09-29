@@ -361,6 +361,14 @@ public sealed class AuthService : IAuthService
     /// These roles already held every permission of their own app, kept complete by seeds
     /// and triggers that have to be got right on every change. The role says it once.
     /// </remarks>
+    /// <summary>Admin: every app, but never a write to logs.</summary>
+    /// <remarks>
+    /// Kept apart from Owner because the exception is real -- an owner may delete an audit
+    /// trail and an admin may not, and collapsing the two would quietly hand that back.
+    /// </remarks>
+    private static readonly HashSet<string> EveryAppAdminRoles =
+        new(StringComparer.Ordinal) { "role-admin" };
+
     private static readonly Dictionary<string, string> AppAdminRoles = new(StringComparer.Ordinal)
     {
         ["role-subscribed-app-msg-admin"] = "msg",
@@ -392,11 +400,15 @@ public sealed class AuthService : IAuthService
         foreach (var role in userRoles)
         {
             if (role.RoleId is null) continue;
-            if (!AppAdminRoles.TryGetValue(role.RoleId, out var app)) continue;
 
-            var prefix = $"permission-{app}-";
-            if (!required.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            // Logs are excluded for every one of these roles, which is why the check comes
+            // before the app match rather than being repeated inside each branch.
             if (required.Contains("-logs-", StringComparison.Ordinal)) continue;
+
+            if (EveryAppAdminRoles.Contains(role.RoleId)) return true;
+
+            if (!AppAdminRoles.TryGetValue(role.RoleId, out var app)) continue;
+            if (!required.StartsWith($"permission-{app}-", StringComparison.Ordinal)) continue;
 
             return true;
         }
