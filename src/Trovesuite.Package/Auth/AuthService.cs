@@ -403,6 +403,28 @@ public sealed class AuthService : IAuthService
         return false;
     }
 
+    /// <summary>Whether these roles allow this one permission.</summary>
+    /// <remarks>
+    /// Static, and the single place the rules are applied, because a caller that tests a
+    /// flattened permission list itself gets none of them. ZelosHR did exactly that --
+    /// middleware flattened every role's permissions into HttpContext and the attribute
+    /// tested membership there -- so the rules added to HasAnyPermission never ran on a
+    /// single one of its routes, and its admin was locked out the moment the rows went.
+    /// </remarks>
+    public static bool Allows(
+        IEnumerable<AuthServiceReadDto> userRoles,
+        string requiredPermission,
+        IEnumerable<string>? ownedPermissions = null)
+    {
+        if (IsOwner(userRoles)) return true;
+        if (AppAdminAllows(userRoles, requiredPermission)) return true;
+
+        var owned = ownedPermissions
+            ?? (userRoles ?? Array.Empty<AuthServiceReadDto>())
+                .SelectMany(r => r.Permissions ?? new List<string>());
+        return owned.Contains(requiredPermission, StringComparer.OrdinalIgnoreCase);
+    }
+
     public bool HasAnyPermission(IEnumerable<AuthServiceReadDto> userRoles, IEnumerable<string> requiredPermissions)
     {
         if (IsOwner(userRoles)) return true;
