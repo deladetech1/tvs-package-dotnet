@@ -89,6 +89,7 @@ public sealed class CorePlatformTableOptions
     public string Permissions { get; set; } = "core_platform.cp_permissions";
     public string Roles { get; set; } = "core_platform.cp_roles";
     public string RolePermissions { get; set; } = "core_platform.cp_role_permissions";
+    public string Actions { get; set; } = "core_platform.cp_actions";
     public string AppSubscriptions { get; set; } = "core_platform.cp_app_subscriptions";
     public string AppSubscriptionHistories { get; set; } = "core_platform.cp_app_subscription_histories";
     public string AppTierConfigs { get; set; } = "core_platform.cp_app_tier_configs";

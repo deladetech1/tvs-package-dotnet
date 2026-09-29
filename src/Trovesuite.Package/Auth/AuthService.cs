@@ -69,6 +69,10 @@ public sealed class AuthService : IAuthService
         {
             var t = _options.Tables;
 
+            // The read-only verb list, once per process. Here rather than inside the
+            // synchronous permission check, which must not block on a query.
+            await LoadReadOnlyActionsAsync(cancellationToken).ConfigureAwait(false);
+
             var tenantRows = await _db.ExecuteQueryAsync(
                 $"SELECT is_verified FROM {t.Tenants} WHERE delete_status = 'NOT_DELETED' AND id = @tenantId",
                 new { tenantId },
@@ -272,7 +276,8 @@ public sealed class AuthService : IAuthService
                 try
                 {
                     permissions = await _db.ExecuteQueryAsync(
-                        $@"SELECT permission_id FROM {t.RolePermissions}
+                        $@"SELECT permission_id, app_prefix, resource_key, action, target, scope
+                           FROM {t.RolePermissions}
                            WHERE role_id = @roleId AND tenant_id = @primaryTenantId AND delete_status = 'NOT_DELETED'",
                         new { roleId, primaryTenantId },
                         cancellationToken).ConfigureAwait(false);
@@ -280,7 +285,8 @@ public sealed class AuthService : IAuthService
                     if (permissions.Count == 0)
                     {
                         var fallback = await _db.ExecuteQueryAsync(
-                            $@"SELECT permission_id FROM {t.RolePermissions}
+                            $@"SELECT permission_id, app_prefix, resource_key, action, target, scope
+                               FROM {t.RolePermissions}
                                WHERE role_id = @roleId AND tenant_id = @fallbackTenantId AND delete_status = 'NOT_DELETED'",
                             new { roleId, fallbackTenantId },
                             cancellationToken).ConfigureAwait(false);
@@ -304,11 +310,7 @@ public sealed class AuthService : IAuthService
                     RoleId = roleId,
                     TenantId = tenantId,
                     ResourceType = resourceType,
-                    Permissions = permissions
-                        .Select(p => p.TryGetValue("permission_id", out var pv) ? pv?.ToString() : null)
-                        .Where(p => !string.IsNullOrWhiteSpace(p))
-                        .Select(p => p!)
-                        .ToList(),
+                    Permissions = PermissionKeys(permissions),
                 });
             }
 
@@ -348,6 +350,56 @@ public sealed class AuthService : IAuthService
         return set.ToList();
     }
 
+    /// <summary>
+    /// How a permission is named when it is named by what it grants rather than by its id.
+    /// </summary>
+    /// <remarks>
+    /// "msg|store-sales|create||any" -- app, resource, verb, target, scope. The generated
+    /// permission modules build the same string on both sides of the wire, so a C# app and
+    /// a Python one ask the same question of the same rows without either knowing the
+    /// other's spelling of it. Must stay byte-identical to AuthService.pair_key in
+    /// tvs-package, separator included.
+    /// </remarks>
+    public const char PairSeparator = '|';
+
+    /// <summary>The canonical name for a permission, from its parts.</summary>
+    public static string PairKey(string? appPrefix, string? resourceKey, string? action, string? target, string? scope) =>
+        string.Join(PairSeparator, new[]
+        {
+            appPrefix ?? string.Empty,
+            resourceKey ?? string.Empty,
+            action ?? string.Empty,
+            target ?? string.Empty,
+            string.IsNullOrEmpty(scope) ? "any" : scope,
+        });
+
+    /// <summary>Every way a grant can be named: its id AND its pair.</summary>
+    /// <remarks>
+    /// Both, deliberately, for the length of one release cycle. This package is a hard
+    /// pin, so an app on an older build still asks for permission ids while one on a newer
+    /// generated module asks for pairs; emitting only one of them would mean whichever app
+    /// moved second matched nothing and refused every request. The ids come out once
+    /// nothing asks for them. The Python package carries the same pair of names.
+    /// </remarks>
+    private static List<string> PermissionKeys(IReadOnlyList<IDictionary<string, object?>> rows)
+    {
+        var keys = new List<string>();
+        foreach (var r in rows ?? Array.Empty<IDictionary<string, object?>>())
+        {
+            var id = Field(r, "permission_id");
+            if (!string.IsNullOrWhiteSpace(id)) keys.Add(id!);
+
+            var resource = Field(r, "resource_key");
+            if (!string.IsNullOrWhiteSpace(resource))
+                keys.Add(PairKey(Field(r, "app_prefix"), resource, Field(r, "action"),
+                                 Field(r, "target"), Field(r, "scope")));
+        }
+        return keys;
+    }
+
+    private static string? Field(IDictionary<string, object?> row, string name) =>
+        row.TryGetValue(name, out var v) ? v?.ToString() : null;
+
     /// <summary>The role that may do anything.</summary>
     /// <remarks>
     /// Checked by role, not by a wildcard permission row. The auto-assign trigger grants
@@ -380,35 +432,104 @@ public sealed class AuthService : IAuthService
         userRoles is not null && userRoles.Any(r =>
             string.Equals(r.RoleId, OwnerRoleId, StringComparison.Ordinal));
 
+    /// <summary>Roles that cover Core Platform, whose permissions carry '' or 'cp'.</summary>
+    private static readonly HashSet<string> CoreAdminRoles =
+        new(StringComparer.Ordinal) { "role-cp-admin" };
+
+    /// <summary>Resources whose modification no admin gets by being an admin. Reading is fine.</summary>
+    /// <remarks>
+    /// Two keys for one idea, because the apps do not agree on the name: Core Platform,
+    /// MyStoreGuard and LoanDrift call it `logs`, ZelosHR calls its own `audit`. Checking only
+    /// `logs` meant an admin was covered for `zeloshr|audit|delete` -- the audit trail the
+    /// rule exists to protect -- and the id-prefix rule this replaced had the same hole, since
+    /// `permission-zeloshr-audit-delete` does not contain `-logs-` either.
+    /// </remarks>
+    private static readonly HashSet<string> ProtectedResources =
+        new(StringComparer.Ordinal) { "logs", "audit" };
+
+    /// <summary>The verbs cp_actions marks read-only, read once per process and kept.</summary>
+    /// <remarks>
+    /// Read from the database rather than listed here: a hand-written list of read verbs
+    /// missed `statistics` once already, and the consequence there was a wrong report --
+    /// here it would be an admin quietly able to delete an audit trail.
+    ///
+    /// Filled during authorization, which is async and already holds the connection, so
+    /// the check itself stays synchronous and never blocks on a query. Until it is filled,
+    /// and if the table cannot be read at all, it is empty -- which makes every verb count
+    /// as a write and the log exception refuse everything on logs. That is the safe
+    /// direction: an admin is told no and says so, rather than deleting logs nobody meant
+    /// them to reach.
+    /// </remarks>
+    private static volatile HashSet<string>? _readOnlyActions;
+
+    private static HashSet<string> Reads() =>
+        _readOnlyActions ?? new HashSet<string>(StringComparer.Ordinal);
+
+    private async Task LoadReadOnlyActionsAsync(CancellationToken cancellationToken)
+    {
+        if (_readOnlyActions is not null) return;
+        try
+        {
+            var rows = await _db.ExecuteQueryAsync(
+                $"SELECT action FROM {_options.Tables.Actions} WHERE is_read_only",
+                new { },
+                cancellationToken).ConfigureAwait(false);
+
+            _readOnlyActions = new HashSet<string>(
+                rows.Select(r => Field(r, "action"))
+                    .Where(a => !string.IsNullOrWhiteSpace(a))
+                    .Select(a => a!),
+                StringComparer.Ordinal);
+        }
+        catch (Exception ex)
+        {
+            // Left null so a later request retries; Reads() reads empty meanwhile, which
+            // refuses log writes rather than allowing them.
+            _logger.LogError(ex, "Could not read {Table}; log writes will be refused to admins until it can be read", _options.Tables.Actions);
+        }
+    }
+
     /// <summary>Whether an app-admin role covers this permission.</summary>
     /// <remarks>
-    /// Matched on the id's own prefix. Every permission of an app is named
-    /// permission-{app}-..., which ZelosHR's catalogue audit already asserts for its own,
-    /// and this package is only ever asked about ids.
+    /// `required` must be a pair -- "msg|store-sales|create||any". An id is not parsed and
+    /// never matches here, so an app still asking for ids falls through to its own grants
+    /// rather than being handed a whole app on a string that merely looks similar. The
+    /// previous version matched the id prefix `permission-{app}-`, which meant a permission
+    /// could only be covered by the app whose name was spelled into its id -- so moving one
+    /// between apps needed the id re-keyed. The pair carries the app itself.
     ///
-    /// Anything to do with logs is excluded outright rather than by verb. The Python side
-    /// reads cp_actions to tell a read from a write; doing that here would mean a database
-    /// call inside a synchronous check, and a hand-written list of read verbs is exactly
-    /// the mistake that let `statistics` be treated as a write once already. Excluding the
-    /// whole family means an app admin never gains a log permission by being an admin --
-    /// reading one falls through to an explicit grant, which is the safe direction.
+    /// Mirrors AuthService._app_admin_allows in tvs-package; the two must agree, because the
+    /// same role means the same thing whichever app the request reaches.
     /// </remarks>
     private static bool AppAdminAllows(IEnumerable<AuthServiceReadDto> userRoles, string required)
     {
         if (string.IsNullOrEmpty(required) || userRoles is null) return false;
+        if (required.IndexOf(PairSeparator) < 0) return false;
+
+        var parts = required.Split(PairSeparator);
+        if (parts.Length < 3) return false;
+        var (app, resource, action) = (parts[0], parts[1], parts[2]);
 
         foreach (var role in userRoles)
         {
             if (role.RoleId is null) continue;
 
-            // Logs are excluded for every one of these roles, which is why the check comes
-            // before the app match rather than being repeated inside each branch.
-            if (required.Contains("-logs-", StringComparison.Ordinal)) continue;
+            if (EveryAppAdminRoles.Contains(role.RoleId))
+            {
+                // Any app, and Core Platform; the log rule below still applies.
+            }
+            else if (app.Length == 0 || app == "cp")
+            {
+                // Core Platform's own permissions, which only a Core Platform admin covers.
+                if (!CoreAdminRoles.Contains(role.RoleId)) continue;
+            }
+            else if (!AppAdminRoles.TryGetValue(role.RoleId, out var owned) || owned != app)
+            {
+                continue;
+            }
 
-            if (EveryAppAdminRoles.Contains(role.RoleId)) return true;
-
-            if (!AppAdminRoles.TryGetValue(role.RoleId, out var app)) continue;
-            if (!required.StartsWith($"permission-{app}-", StringComparison.Ordinal)) continue;
+            // Everything in their app, except changing its logs.
+            if (ProtectedResources.Contains(resource) && !Reads().Contains(action)) continue;
 
             return true;
         }
