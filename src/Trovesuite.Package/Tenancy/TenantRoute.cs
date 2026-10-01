@@ -41,6 +41,38 @@ public sealed record TenantRoute
     public string? SchemaVersion { get; init; }
 
     /// <summary>
+    /// Whether this row also answers for every subdomain of <see cref="Host"/>.
+    /// </summary>
+    /// <remarks>
+    /// Set on a parent domain whose subdomains all share one tenancy answer — the
+    /// employee portal, where every <c>&lt;company&gt;.dev.zeloshr.com</c> is pooled
+    /// and the token says which company. An exact row always wins over this, so a
+    /// tenant moving to its own database is a one-row change.
+    /// </remarks>
+    public bool IsWildcard { get; init; }
+
+    /// <summary>
+    /// The host that was actually ASKED for, which is not <see cref="Host"/> when a
+    /// wildcard parent answered.
+    /// </summary>
+    /// <remarks>
+    /// Both are worth having: <see cref="Host"/> says which row decided,
+    /// this says what the browser sent, and a log line with only the first is
+    /// baffling the moment wildcards exist.
+    /// </remarks>
+    public string? RequestedHost { get; init; }
+
+    /// <summary>
+    /// Whether a wildcard parent answered rather than an exact row.
+    /// </summary>
+    /// <remarks>
+    /// Worth asking before anything that assumes the address names one tenant: a
+    /// wildcard row serves many, so the token is the only thing that says which.
+    /// </remarks>
+    public bool AnsweredByParent =>
+        RequestedHost is not null && !string.Equals(RequestedHost, Host, StringComparison.Ordinal);
+
+    /// <summary>
     /// Whether this route points at a database other than the one this pod was
     /// configured with. Reads the tier rather than sniffing for a populated
     /// column, because the database refuses to store a silo row without one

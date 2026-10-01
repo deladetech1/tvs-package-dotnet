@@ -33,10 +33,13 @@ namespace Trovesuite.Package.Tenancy;
 /// </remarks>
 public sealed class TenantRouteResolver : ITenantRouteResolver
 {
+    /// <summary>How far up the domain to look for a wildcard parent. See <see cref="Parents"/>.</summary>
+    private const int MaxParents = 10;
+
     private const string Columns =
         "host, tenant_id, tier, cell_key, db_server_fqdn, db_name, db_secret_uri, " +
         "storage_account, container_prefix, storage_secret_uri, api_base, status, " +
-        "schema_version";
+        "schema_version, is_wildcard";
 
     private readonly IDatabaseManager _database;
     private readonly TenancyOptions _options;
@@ -86,6 +89,34 @@ public sealed class TenantRouteResolver : ITenantRouteResolver
         return host.TrimEnd('.');
     }
 
+    /// <summary>
+    /// <paramref name="host"/>, then each parent domain that still has a dot in it.
+    /// </summary>
+    /// <remarks>
+    /// <c>deladetech.dev.zeloshr.com</c> gives deladetech.dev.zeloshr.com,
+    /// dev.zeloshr.com, zeloshr.com. It stops before the single-label tail for the
+    /// same reason the database refuses to flag one as a wildcard: <c>com</c> is not
+    /// a domain anybody owns, and a row for it would claim the entire internet.
+    ///
+    /// Capped, because the list goes into a query and the Host header is
+    /// attacker-controlled. A legal hostname cannot have many more labels than this
+    /// anyway; the cap is here so a crafted one cannot make the list interesting.
+    /// </remarks>
+    public static List<string> Parents(string host)
+    {
+        var out_ = new List<string> { host };
+        var rest = host;
+        while (out_.Count <= MaxParents)
+        {
+            var dot = rest.IndexOf('.');
+            if (dot < 0) break;
+            rest = rest[(dot + 1)..];
+            if (!rest.Contains('.')) break;
+            out_.Add(rest);
+        }
+        return out_;
+    }
+
     public async Task<TenantRoute?> ResolveAsync(string? host, CancellationToken cancellationToken = default)
     {
         var key = NormaliseHost(host);
@@ -129,7 +160,7 @@ public sealed class TenantRouteResolver : ITenantRouteResolver
                     $"SELECT {Columns} FROM {_options.RoutesTable} " +
                     "WHERE status = 'ACTIVE' ORDER BY host",
                     cancellationToken: cancellationToken).ConfigureAwait(false);
-                return rows.Select(ToRoute).ToList();
+                return rows.Select(row => ToRoute(row)).ToList();
             }
         }
         catch (Exception ex)
@@ -139,6 +170,21 @@ public sealed class TenantRouteResolver : ITenantRouteResolver
         }
     }
 
+    /// <summary>
+    /// The row that claims <paramref name="host"/>: its own, or a parent that claims
+    /// its subdomains.
+    /// </summary>
+    /// <remarks>
+    /// One query, not two. The candidate list is the host plus its parent domains,
+    /// and the ordering puts the longest match first — which is the exact row when
+    /// there is one, so an exact row always beats a wildcard and a tenant moving to
+    /// its own database needs nothing but that row.
+    ///
+    /// <c>host = ANY(...)</c> rather than <c>LIKE '%.' || host</c>: a stored host
+    /// could contain an underscore, which LIKE reads as "any character", and
+    /// <c>foo_bar.com</c> would then answer for <c>fooXbar.com</c>. An equality check
+    /// against a short list cannot be tricked that way, and it uses the primary key.
+    /// </remarks>
     private async Task<TenantRoute?> FetchAsync(string host, CancellationToken cancellationToken)
     {
         try
@@ -149,10 +195,12 @@ public sealed class TenantRouteResolver : ITenantRouteResolver
             using (TenantContext.TenantlessRead())
             {
                 var rows = await _database.ExecuteQueryAsync(
-                    $"SELECT {Columns} FROM {_options.RoutesTable} WHERE host = @host",
-                    new { host },
+                    $"SELECT {Columns} FROM {_options.RoutesTable} " +
+                    "WHERE host = ANY(@candidates) AND (host = @host OR is_wildcard) " +
+                    "ORDER BY length(host) DESC LIMIT 1",
+                    new { candidates = Parents(host), host },
                     cancellationToken).ConfigureAwait(false);
-                return rows.Count == 0 ? null : ToRoute(rows[0]);
+                return rows.Count == 0 ? null : ToRoute(rows[0], host);
             }
         }
         catch (Exception ex)
@@ -177,7 +225,7 @@ public sealed class TenantRouteResolver : ITenantRouteResolver
     /// <c>DbServerFqdn</c> unless a global static is flipped. Doing it here keeps
     /// the package from depending on a setting a consumer could change.
     /// </summary>
-    private static TenantRoute ToRoute(IDictionary<string, object?> row)
+    private static TenantRoute ToRoute(IDictionary<string, object?> row, string? requestedHost = null)
     {
         return new TenantRoute
         {
@@ -194,6 +242,9 @@ public sealed class TenantRouteResolver : ITenantRouteResolver
             StorageSecretUri = Str(row, "storage_secret_uri"),
             ApiBase = Str(row, "api_base"),
             SchemaVersion = Str(row, "schema_version"),
+            IsWildcard = row.TryGetValue("is_wildcard", out var wild)
+                         && wild is bool b && b,
+            RequestedHost = requestedHost ?? Str(row, "host"),
         };
     }
 

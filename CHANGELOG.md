@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.6 (2026-10-01)
+
+Wildcard parent routes, matching `trovesuite` 1.0.53 on the Python side.
+
+- A `ctl_tenant_routes` row flagged `is_wildcard` also answers for every subdomain
+  of its host, so the employee portal's `<company>.dev.zeloshr.com` resolves
+  without a row per portal. An exact host always wins, which is what makes a
+  tenant moving to its own database a one-row change rather than a backfill.
+- `TenantRoute.IsWildcard`, `TenantRoute.RequestedHost` and
+  `TenantRoute.AnsweredByParent`. `Host` says which row decided, `RequestedHost`
+  says what the browser sent.
+- `TenantRouteResolver.Parents(host)` is public, like `NormaliseHost`: a pure
+  function stating a documented rule, worth checking from outside the package.
+- The lookup is one query over the host plus its parent domains, ordered
+  longest-first. `host = ANY(...)` and not `LIKE '%.' || host`, because a stored
+  host may contain an underscore, which LIKE reads as "any character".
+
+Requires migration `20261001-04-a-parent-domain-may-claim-its-subdomains.sql`.
+Without the column the lookup fails, the resolver warns once and treats every host
+as unresolved — harmless while `Trovesuite:Tenancy:Enforce` is off, an outage if it
+is on. The deploy pipelines migrate before they roll the image.
+
 ## 1.0.5 (2026-10-01)
 
 Tenant routing, mirroring the Python package's `trovesuite.tenancy`. Nothing in this
