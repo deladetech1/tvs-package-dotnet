@@ -4,6 +4,7 @@ using Trovesuite.Package.Auth;
 using Trovesuite.Package.Database;
 using Trovesuite.Package.Notification;
 using Trovesuite.Package.Storage;
+using Trovesuite.Package.Tenancy;
 using Trovesuite.Package.Utils;
 
 namespace Trovesuite.Package.Configuration;
@@ -30,6 +31,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IAuthService, AuthService>();
         services.AddSingleton<INotificationService, NotificationService>();
         services.AddSingleton<IStorageService, StorageService>();
+        // Singleton because it owns a process-wide cache; the middleware that
+        // uses it is per-request but holds no state of its own.
+        services.AddSingleton<ITenantRouteResolver, TenantRouteResolver>();
         return services;
     }
 }

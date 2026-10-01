@@ -10,6 +10,7 @@ public sealed class TrovesuiteOptions
     public AzureStorageOptions AzureStorage { get; set; } = new();
     public CorePlatformTableOptions Tables { get; set; } = new();
     public AppOptions App { get; set; } = new();
+    public Tenancy.TenancyOptions Tenancy { get; set; } = new();
 }
 
 public sealed class DatabaseOptions
