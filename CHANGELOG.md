@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.7 (2026-10-02)
+
+`Tenancy/DatabaseFanout` — running background work once per DATABASE, mirroring
+`trovesuite.tenancy.for_each_database` on the Python side so both halves of the
+suite convert the same way.
+
+Not once per tenant, which was the obvious reading and is wrong: the route table
+enumerates addresses, every pooled row has a null `TenantId` because a pooled
+address serves all tenants, and the token says which. Within a database the
+existing query is already right.
+
+- `ActiveDatabaseScopesAsync` — one route per distinct (server, database), with
+  both null meaning "the database this pod was configured with".
+- `ForEachDatabaseAsync` — the loop, with the try/catch outside the scope and
+  inside the loop so one unreachable database does not stop the others, and a
+  fallback that runs the work **once** unscoped if the control plane cannot be
+  read at all. Work that silently stops because a lookup failed is worse than the
+  failure it would be guarding against.
+
 ## 1.0.6 (2026-10-01)
 
 Wildcard parent routes, matching `trovesuite` 1.0.53 on the Python side.
