@@ -151,6 +151,36 @@ public sealed class TenantContextMiddleware
 
         using (TenantContext.Scope(route))
         {
+            // Resolve this silo's credential BEFORE any handler runs.
+            //
+            // EF Core builds its DbContext options synchronously and the apps'
+            // own connection helpers are synchronous too, so neither can read a
+            // Key Vault secret when it needs one. Paying for it here, once per
+            // request, is what lets those paths be a dictionary lookup. A no-op
+            // for a pooled route and a lookup for a silo already seen.
+            //
+            // A failure here refuses the request rather than letting it reach a
+            // handler that would fall back to this pod's own database.
+            var factory = context.RequestServices
+                .GetService(typeof(Database.IDbConnectionFactory)) as Database.NpgsqlConnectionFactory;
+            if (factory is not null && route.HasOwnDatabase)
+            {
+                try
+                {
+                    await factory.PrepareForRouteAsync(route, context.RequestAborted)
+                        .ConfigureAwait(false);
+                }
+                catch (SiloUnavailableException ex)
+                {
+                    _logger.LogError(ex,
+                        "Refusing {Host}: its own database could not be reached", route.Host);
+                    await RefuseAsync(context, 503,
+                        "This workspace is temporarily unavailable. Please try again shortly.")
+                        .ConfigureAwait(false);
+                    return;
+                }
+            }
+
             await _next(context).ConfigureAwait(false);
         }
     }

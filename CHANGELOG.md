@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.0.8 (2026-10-02)
+
+A connection follows the route, mirroring `trovesuite` 1.0.56. Until now the
+.NET apps resolved WHICH tenant a request belonged to and then connected to the
+pod's configured database anyway — correct while every route was POOLED and
+there was one database, and a cross-tenant read the moment a silo existed.
+
+- `Tenancy/SiloDataSources` — one Npgsql data source per silo credential, keyed
+  on the secret reference rather than the host, because several hosts can address
+  one silo and one host must not end up with several pools.
+- `TenantRoute.SiloKey` and `TenancyOptions.DbSecretPrefix` / `KeyVaultUri`.
+  **Each app resolves its own credential**: a silo has a login role per app, so
+  the row names the silo and the app names itself —
+  `db-url-<app-slug>-<silo_key>`, the pooled name plus a suffix. A leaked
+  credential is then one app's access to one tenant rather than every app's to
+  all of them. A row carrying a single `DbSecretUri` is still honoured.
+- The prefix is configuration, not derivation. Nothing in a running container
+  spells the slug the way the secret does — these apps set no app name at all,
+  and core-platform's is `core-platform` where its secret says `coreplatform` —
+  so the IaC that creates the secret supplies it. Guessing would give four apps
+  that work and one that does not.
+- `NpgsqlConnectionFactory` consults the route on both overloads, and
+  `DataSourceForCurrentRoute()` serves EF Core.
+- The middleware calls `PrepareForRouteAsync` before any handler runs. EF builds
+  its options synchronously and the apps' own helpers are synchronous, so neither
+  can read a Key Vault secret when it needs one; paying for it once per request
+  makes those paths a dictionary lookup. A failure there refuses the request with
+  503 rather than letting it reach a handler that would fall back.
+- `ForgetAsync` / `ForgetSiloAsync`, because a composed reference carries no
+  secret VERSION: the name is unchanged across a rotation, so the stale pool
+  would otherwise be reused with the old password until the process restarted.
+
+**It fails closed throughout.** Unset configuration, an unreadable vault, a silo
+route with nothing prepared — all throw `SiloUnavailableException`. None of them
+falls back to the pod's own database, because that serves one tenant from the
+shared one and looks like success.
+
 ## 1.0.7 (2026-10-02)
 
 `Tenancy/DatabaseFanout` — running background work once per DATABASE, mirroring

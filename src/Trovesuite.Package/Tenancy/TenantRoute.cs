@@ -32,6 +32,17 @@ public sealed record TenantRoute
     /// <summary>A Key Vault secret URI, never a credential.</summary>
     public string? DbSecretUri { get; init; }
 
+    /// <summary>
+    /// Which silo this row addresses, as the IaC roster keys it.
+    /// </summary>
+    /// <remarks>
+    /// An app composes its own credential name from this plus its own identity —
+    /// <c>db-url-&lt;app-slug&gt;-&lt;silo_key&gt;</c> — so the row holds neither a
+    /// secret nor a secret's address, and one leaked credential cannot be the
+    /// whole silo's. Null for POOLED.
+    /// </remarks>
+    public string? SiloKey { get; init; }
+
     public string? StorageAccount { get; init; }
     public string? ContainerPrefix { get; init; }
     public string? StorageSecretUri { get; init; }

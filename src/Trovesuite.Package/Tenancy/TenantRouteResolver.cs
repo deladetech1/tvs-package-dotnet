@@ -39,7 +39,7 @@ public sealed class TenantRouteResolver : ITenantRouteResolver
     private const string Columns =
         "host, tenant_id, tier, cell_key, db_server_fqdn, db_name, db_secret_uri, " +
         "storage_account, container_prefix, storage_secret_uri, api_base, status, " +
-        "schema_version, is_wildcard";
+        "schema_version, is_wildcard, silo_key";
 
     private readonly IDatabaseManager _database;
     private readonly TenancyOptions _options;
@@ -237,6 +237,7 @@ public sealed class TenantRouteResolver : ITenantRouteResolver
             DbServerFqdn = Str(row, "db_server_fqdn"),
             DbName = Str(row, "db_name"),
             DbSecretUri = Str(row, "db_secret_uri"),
+            SiloKey = Str(row, "silo_key"),
             StorageAccount = Str(row, "storage_account"),
             ContainerPrefix = Str(row, "container_prefix"),
             StorageSecretUri = Str(row, "storage_secret_uri"),

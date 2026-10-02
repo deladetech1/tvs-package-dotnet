@@ -72,6 +72,28 @@ public sealed class TenancyOptions
     public List<string> ExemptPathPrefixes { get; set; } =
         new() { "/health", "/swagger", "/openapi", "/favicon.ico" };
 
+    /// <summary>
+    /// This app's half of a silo secret name, e.g. <c>db-url-zeloshr-admin</c>.
+    /// </summary>
+    /// <remarks>
+    /// A silo has a login role per app, so the route row names the silo and this
+    /// names the app: the credential is <c>db-url-&lt;prefix&gt;-&lt;silo_key&gt;</c>.
+    ///
+    /// Supplied by the IaC that creates the secret, because that is the only
+    /// place the slug is known — it is the app's folder under
+    /// <c>applications/</c> with "/" flattened, which these apps do not carry at
+    /// run time. Unset means a silo route is REFUSED rather than served from the
+    /// pooled database.
+    /// </remarks>
+    public string? DbSecretPrefix { get; set; }
+
+    /// <summary>The Key Vault holding this environment's secrets.</summary>
+    /// <remarks>
+    /// Only the vault and the secret's NAME; the pod's managed identity is what
+    /// decides whether it may be read.
+    /// </remarks>
+    public string? KeyVaultUri { get; set; }
+
     /// <summary>Whether to report database access that happens with no tenant in
     /// scope. On by default: the list it produces is the work Phase 2 needs, and
     /// it is one log line per call site per process.</summary>
