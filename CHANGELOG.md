@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.10 (2026-10-02)
+
+`Tenancy/TenantStorage` — storage follows the route, mirroring `trovesuite`
+1.0.57. The other half of the tier model: own DATABASE means own CONTAINERS
+inside the shared account, own SERVER means its own storage ACCOUNT. A route row
+has carried `StorageAccount` and `ContainerPrefix` from the start and nothing
+read them, so a silo tenant's documents went into the shared app container with
+everybody else's.
+
+Resolved in one place each inside `StorageService`: the account in the single
+client factory, the container at each of the seven operations that names one.
+Callers pass what they always passed.
+
+- A prefix is a RENAME, not a directory — `uploads` becomes `shared-uploads`,
+  because the shared account also holds the apps' own containers. Idempotent.
+- A dedicated silo owns its whole account and gets no prefix.
+- Includes the SAS builder's `BlobContainerName`: a token signed for a container
+  that does not exist is just an invalid URL.
+- An account URL whose shape is unrecognised is left alone, and only the account
+  label is replaced, so a sovereign-cloud suffix survives.
+
 ## 1.0.9 (2026-10-02)
 
 Two bugs in 1.0.8's silo connections, both found by the first real silo request

@@ -41,7 +41,11 @@ public sealed class StorageService : IStorageService
 
     private static BlobServiceClient GetBlobServiceClient(string storageAccountUrl, string? managedIdentityClientId)
     {
-        return new BlobServiceClient(new Uri(storageAccountUrl), GetCredential(managedIdentityClientId));
+        // A silo with its own storage ACCOUNT is redirected here, the one place
+        // every operation opens a client. A pooled tenant's URL is unchanged.
+        return new BlobServiceClient(
+            new Uri(Tenancy.TenantStorage.AccountUrl(storageAccountUrl)),
+            GetCredential(managedIdentityClientId));
     }
 
     public async Task<Respons<StorageContainerCreateServiceReadDto>> CreateContainerAsync(StorageContainerCreateServiceWriteDto data, CancellationToken cancellationToken = default)
@@ -53,11 +57,11 @@ public sealed class StorageService : IStorageService
                 ? PublicAccessType.None
                 : Enum.TryParse<PublicAccessType>(data.PublicAccess, true, out var pa) ? pa : PublicAccessType.None;
 
-            var containerClient = await blobService.CreateBlobContainerAsync(data.ContainerName, access, cancellationToken: cancellationToken).ConfigureAwait(false);
+            var containerClient = await blobService.CreateBlobContainerAsync(Tenancy.TenantStorage.Container(data.ContainerName), access, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             var result = new StorageContainerCreateServiceReadDto
             {
-                ContainerName = data.ContainerName,
+                ContainerName = Tenancy.TenantStorage.Container(data.ContainerName),
                 ContainerUrl = containerClient.Value.Uri.ToString(),
             };
             return Respons<StorageContainerCreateServiceReadDto>.Ok(new[] { result }, $"Container '{data.ContainerName}' created successfully", 201);
@@ -85,7 +89,7 @@ public sealed class StorageService : IStorageService
         try
         {
             var blobService = GetBlobServiceClient(data.StorageAccountUrl, data.ManagedIdentityClientId);
-            var blob = blobService.GetBlobContainerClient(data.ContainerName).GetBlobClient(blobName);
+            var blob = blobService.GetBlobContainerClient(Tenancy.TenantStorage.Container(data.ContainerName)).GetBlobClient(blobName);
 
             var headers = data.ContentType is null ? null : new BlobHttpHeaders { ContentType = data.ContentType };
             using var stream = new MemoryStream(data.FileContent);
@@ -117,7 +121,7 @@ public sealed class StorageService : IStorageService
         try
         {
             var blobService = GetBlobServiceClient(data.StorageAccountUrl, data.ManagedIdentityClientId);
-            var blob = blobService.GetBlobContainerClient(data.ContainerName).GetBlobClient(data.BlobName);
+            var blob = blobService.GetBlobContainerClient(Tenancy.TenantStorage.Container(data.ContainerName)).GetBlobClient(data.BlobName);
 
             if (!await blob.ExistsAsync(cancellationToken).ConfigureAwait(false))
                 return Respons<StorageFileUpdateServiceReadDto>.Fail("Resource not found. Use upload_file to create new files.", $"File '{data.BlobName}' not found", 404);
@@ -147,7 +151,7 @@ public sealed class StorageService : IStorageService
         try
         {
             var blobService = GetBlobServiceClient(data.StorageAccountUrl, data.ManagedIdentityClientId);
-            var blob = blobService.GetBlobContainerClient(data.ContainerName).GetBlobClient(data.BlobName);
+            var blob = blobService.GetBlobContainerClient(Tenancy.TenantStorage.Container(data.ContainerName)).GetBlobClient(data.BlobName);
 
             var deleted = await blob.DeleteIfExistsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
             if (!deleted.Value)
@@ -171,7 +175,7 @@ public sealed class StorageService : IStorageService
         try
         {
             var blobService = GetBlobServiceClient(storageAccountUrl, managedIdentityClientId);
-            var container = blobService.GetBlobContainerClient(containerName);
+            var container = blobService.GetBlobContainerClient(Tenancy.TenantStorage.Container(containerName));
 
             foreach (var blobName in blobNames)
             {
@@ -214,7 +218,7 @@ public sealed class StorageService : IStorageService
         try
         {
             var blobService = GetBlobServiceClient(data.StorageAccountUrl, data.ManagedIdentityClientId);
-            var blob = blobService.GetBlobContainerClient(data.ContainerName).GetBlobClient(data.BlobName);
+            var blob = blobService.GetBlobContainerClient(Tenancy.TenantStorage.Container(data.ContainerName)).GetBlobClient(data.BlobName);
 
             if (!await blob.ExistsAsync(cancellationToken).ConfigureAwait(false))
                 return Respons<StorageFileDownloadServiceReadDto>.Fail("Resource not found", $"File '{data.BlobName}' not found", 404);
@@ -244,7 +248,7 @@ public sealed class StorageService : IStorageService
         try
         {
             var blobService = GetBlobServiceClient(data.StorageAccountUrl, data.ManagedIdentityClientId);
-            var blob = blobService.GetBlobContainerClient(data.ContainerName).GetBlobClient(data.BlobName);
+            var blob = blobService.GetBlobContainerClient(Tenancy.TenantStorage.Container(data.ContainerName)).GetBlobClient(data.BlobName);
 
             if (!await blob.ExistsAsync(cancellationToken).ConfigureAwait(false))
                 return Respons<StorageFileUrlServiceReadDto>.Fail("Resource not found", $"File '{data.BlobName}' not found", 404);
@@ -257,7 +261,9 @@ public sealed class StorageService : IStorageService
 
             var sasBuilder = new BlobSasBuilder
             {
-                BlobContainerName = data.ContainerName,
+                // The real container, not the requested one: a SAS signed for a
+                // name that does not exist is simply an invalid URL.
+                BlobContainerName = Tenancy.TenantStorage.Container(data.ContainerName),
                 BlobName = data.BlobName,
                 Resource = "b",
                 ExpiresOn = expiresOn,
