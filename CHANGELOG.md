@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.9 (2026-10-02)
+
+Two bugs in 1.0.8's silo connections, both found by the first real silo request
+to a .NET app on dev, neither reachable by building.
+
+- **The secret is a libpq URI and Npgsql does not take one.** Every `db-url-*`
+  secret is `postgresql://user:pass@host:5432/db?sslmode=require`, because that
+  is what psycopg2 reads natively and the Python apps read the same secrets.
+  `NpgsqlDataSourceBuilder` wants keyword/value pairs and, handed a URI, reads
+  the whole string as one keyword: `ArgumentException: Couldn't set
+  postgresql://… ---> KeyNotFoundException`. So every silo request was refused
+  with 503. `Tenancy/PostgresUri` normalises it, and passes a keyword/value
+  string through untouched.
+- **The failure published the tenant's database password.** Npgsql puts the
+  offending connection string in its `ArgumentException`, so the message — and
+  the inner exception, since logging an exception walks the whole chain — printed
+  the credential into the container log. Both are now dropped; the message keeps
+  the database, the server and the exception type, none of which is a secret.
+
 ## 1.0.8 (2026-10-02)
 
 A connection follows the route, mirroring `trovesuite` 1.0.56. Until now the

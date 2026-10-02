@@ -129,12 +129,27 @@ public sealed class SiloDataSources : IAsyncDisposable
         NpgsqlDataSource built;
         try
         {
-            built = new NpgsqlDataSourceBuilder(dsn).Build();
+            // The secret is a libpq URI, which Npgsql does not accept. See
+            // PostgresUri: handed one raw it reads the whole string as a single
+            // keyword and throws, which is how the first silo request failed.
+            built = new NpgsqlDataSourceBuilder(PostgresUri.Normalize(dsn)).Build();
         }
         catch (Exception ex)
         {
+            // Neither ex.Message NOR ex as the inner exception.
+            //
+            // Npgsql puts the offending connection string in its
+            // ArgumentException, so the first silo request printed this tenant's
+            // database password into the container log. Keeping the inner
+            // exception does not help: the middleware logs the exception, and
+            // logging an exception walks the whole chain, so the inner message
+            // is published either way.
+            //
+            // The type name and the route are what anyone debugging needs, and
+            // neither carries a credential.
             throw new SiloUnavailableException(
-                $"Could not open '{route.DbName}' for '{route.Host}': {ex.Message}", ex);
+                $"Could not open '{route.DbName}' on '{route.DbServerFqdn}' for " +
+                $"'{route.Host}': {ex.GetType().Name}");
         }
 
         // Another request may have won the race; keep theirs and dispose ours
