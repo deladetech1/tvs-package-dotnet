@@ -33,9 +33,23 @@ namespace Trovesuite.Package.Tenancy;
 /// nothing and because a deployment where the API does share the tenant's host
 /// still works.</para>
 ///
-/// The first of those that RESOLVES wins, rather than the first that is present,
-/// so a browser calling from an origin nobody has registered still falls through
-/// to the remaining signals instead of being refused.
+/// The first of those that NAMES A TENANT decides, and if it names one we do not
+/// know, the request is refused rather than passed down the list.
+///
+/// <para>This used to take the first signal that RESOLVED, falling through an
+/// unknown one so that a browser on an unregistered origin was still served. The
+/// effect was the opposite of safe: Origin is tried first, and when it did not
+/// resolve the next candidate was <c>Host</c> — which for every deployed app is
+/// the API's OWN address, and that is registered, as POOLED. A browser on any
+/// unregistered address under a product domain was quietly handed a session on
+/// the shared database. Found on the Python side of this, where signing in at
+/// king.dev.trovesuite.com worked.</para>
+///
+/// <para>Origin and X-Tenant-Host are claims about WHICH TENANT a request is for.
+/// A claim that cannot be placed is an answer, not a gap. Host is not such a
+/// claim — it says where the request arrived, not whose data it wants — so
+/// falling back to it is still right when no tenant signal was offered at
+/// all.</para>
 /// </remarks>
 public sealed class TenantContextMiddleware
 {
@@ -43,6 +57,19 @@ public sealed class TenantContextMiddleware
     private readonly ITenantRouteResolver _resolver;
     private readonly TenancyOptions _options;
     private readonly ILogger<TenantContextMiddleware> _logger;
+
+    /// <summary>
+    /// Signals that are a CLAIM ABOUT WHICH TENANT this request belongs to.
+    /// </summary>
+    /// <remarks>
+    /// <c>Host</c> is deliberately not one. For every deployed application it is
+    /// the API's own address, which says where the request arrived rather than
+    /// whose data it wants — and treating it as a fallback for an unknown Origin
+    /// is what turned "I am king.dev.trovesuite.com" into "I am the pooled
+    /// database".
+    /// </remarks>
+    private static readonly HashSet<string> TenantClaimSignals =
+        new(StringComparer.Ordinal) { "origin", "x-tenant-host", "x-forwarded-host" };
 
     /// <summary>Where the resolved route is published for handlers that want it.</summary>
     public const string RouteItemKey = "tenant_route";
@@ -78,6 +105,11 @@ public sealed class TenantContextMiddleware
         string? signal = null;
         var host = candidates.Count > 0 ? candidates[0].Host : string.Empty;
 
+        // Set when a signal NAMED a tenant we have never heard of. The search
+        // stops there: the next candidate is the API's own host, which would
+        // answer a question nobody asked.
+        string? unknownTenantSignal = null;
+
         foreach (var (candidateSignal, candidate) in candidates)
         {
             var found = await _resolver.ResolveAsync(candidate, context.RequestAborted)
@@ -86,6 +118,13 @@ public sealed class TenantContextMiddleware
             {
                 route = found;
                 signal = candidateSignal;
+                host = candidate;
+                break;
+            }
+
+            if (TenantClaimSignals.Contains(candidateSignal))
+            {
+                unknownTenantSignal = candidateSignal;
                 host = candidate;
                 break;
             }
@@ -107,9 +146,15 @@ public sealed class TenantContextMiddleware
 
         if (route is null)
         {
-            if (enforce)
+            // A signal that NAMED a tenant we do not know is refused even when
+            // enforcement is off. That switch exists so an unrecognised Host can
+            // be observed during rollout without breaking anything; it was never
+            // meant to permit serving a tenant address belonging to nobody.
+            if (enforce || unknownTenantSignal is not null)
             {
-                _logger.LogWarning("Refusing request for unrouted host {Host}", host);
+                _logger.LogWarning(
+                    "Refusing request for unrouted host {Host} (signal={Signal})",
+                    host, unknownTenantSignal ?? "host");
                 await RefuseAsync(context, 404, "This address is not configured. Check the URL.")
                     .ConfigureAwait(false);
                 return;
