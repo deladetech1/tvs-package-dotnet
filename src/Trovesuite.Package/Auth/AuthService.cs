@@ -25,6 +25,54 @@ public sealed class AuthService : IAuthService
         _logger = logger;
     }
 
+    /// <summary>
+    /// Whether this database knows what a lock is. Null until the first attempt.
+    /// </summary>
+    /// <remarks>
+    /// The column arrived in migrations/shared/20261004-05, and shared/ reaches every
+    /// database -- but not all of them at the same moment, and a self-hosted install
+    /// applies migrations on its own schedule. A package that simply named the column
+    /// would turn "this database is one release behind" into "nobody can use any app
+    /// here", which is a far worse outcome than the one being prevented.
+    ///
+    /// So the wide read is tried once. If the column is not there, the narrow read is
+    /// used from then on and the lock is not enforced in that database -- which is
+    /// honest: a database with no column has no lock to enforce. Nothing is cached
+    /// across processes, so the capability is picked up on the next restart after the
+    /// migration lands.
+    /// </remarks>
+    private static bool? _tenantHasLock;
+
+    private async Task<IReadOnlyList<IDictionary<string, object?>>> TenantStandingAsync(
+        string tenantsTable, string tenantId, CancellationToken cancellationToken)
+    {
+        var narrow = $"SELECT is_verified FROM {tenantsTable} WHERE delete_status = 'NOT_DELETED' AND id = @tenantId";
+        var wide = $"SELECT is_verified, is_locked, lock_reason FROM {tenantsTable} WHERE delete_status = 'NOT_DELETED' AND id = @tenantId";
+
+        if (_tenantHasLock == false)
+            return await _db.ExecuteQueryAsync(narrow, new { tenantId }, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            var rows = await _db.ExecuteQueryAsync(wide, new { tenantId }, cancellationToken)
+                .ConfigureAwait(false);
+            _tenantHasLock = true;
+            return rows;
+        }
+        // Only a missing column may be shrugged off. Anything else -- the database
+        // being down, the table being gone -- has to keep failing the way it did
+        // before, because AuthorizeAsync is what turns those into a refusal rather
+        // than a pass. 42703 is undefined_column and nothing else is.
+        catch (Npgsql.PostgresException e) when (e.SqlState == "42703")
+        {
+            _tenantHasLock = false;
+            _logger.LogWarning(
+                "{Table} has no is_locked column, so account suspension is not enforced in this database. Apply migrations/shared/20261004-05.",
+                tenantsTable);
+            return await _db.ExecuteQueryAsync(narrow, new { tenantId }, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     public IDictionary<string, string?> DecodeToken(string token)
     {
         var principal = ValidateToken(token);
@@ -73,15 +121,41 @@ public sealed class AuthService : IAuthService
             // synchronous permission check, which must not block on a query.
             await LoadReadOnlyActionsAsync(cancellationToken).ConfigureAwait(false);
 
-            var tenantRows = await _db.ExecuteQueryAsync(
-                $"SELECT is_verified FROM {t.Tenants} WHERE delete_status = 'NOT_DELETED' AND id = @tenantId",
-                new { tenantId },
-                cancellationToken).ConfigureAwait(false);
+            // The tenant's standing, read once for both questions: has it confirmed its
+            // email, and have WE suspended it. One row, one trip.
+            var tenantRows = await TenantStandingAsync(t.Tenants, tenantId, cancellationToken)
+                .ConfigureAwait(false);
 
             if (tenantRows.Count == 0)
             {
                 _logger.LogWarning("Authorization failed - tenant not found: {TenantId}", tenantId);
                 return Respons<AuthServiceReadDto>.Fail("TENANT_NOT_FOUND", $"Tenant '{tenantId}' not found or has been deleted", 404);
+            }
+
+            // SUSPENDED BY US.
+            //
+            // Checked here and not only at sign-in, because a token already in
+            // somebody's browser is good for up to twenty-four hours -- so a lock
+            // enforced only on the sign-in path leaves a suspended client working for
+            // the rest of the day. This app is the reason it has to be in the package
+            // as well as in Core Platform: it validates tokens itself and never asks
+            // Core Platform whether one still counts.
+            //
+            // Before the verified check on purpose: a tenant can be both, and "this
+            // account has been suspended" is the answer that is true and the one
+            // somebody can act on.
+            if (tenantRows[0].TryGetValue("is_locked", out var lockedValue) && ToBool(lockedValue))
+            {
+                tenantRows[0].TryGetValue("lock_reason", out var reasonValue);
+                var reason = reasonValue?.ToString();
+                _logger.LogWarning(
+                    "Authorization refused - tenant locked: {TenantId} (user {UserId}, reason {Reason})",
+                    tenantId, userId, string.IsNullOrWhiteSpace(reason) ? "none recorded" : reason);
+                return Respons<AuthServiceReadDto>.Fail(
+                    "TENANT_LOCKED",
+                    "This account has been suspended. Please contact support."
+                        + (string.IsNullOrWhiteSpace(reason) ? string.Empty : $" ({reason})"),
+                    403);
             }
 
             var isVerified = ToBool(tenantRows[0]["is_verified"]);
