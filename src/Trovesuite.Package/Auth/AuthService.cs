@@ -18,6 +18,9 @@ public sealed class AuthService : IAuthService
     /// <summary>The error code of a refusal for a session that has been ended.</summary>
     public const string SessionRevokedCode = "SESSION_REVOKED";
 
+    /// <summary>The error code of a refusal for a token that did not verify.</summary>
+    public const string InvalidTokenCode = "INVALID_TOKEN";
+
     private readonly IDatabaseManager _db;
     private readonly TrovesuiteOptions _options;
     private readonly ILogger<AuthService> _logger;
@@ -141,6 +144,14 @@ public sealed class AuthService : IAuthService
             // map an exception to "could not validate credentials", which sends somebody
             // to reset a password that was never the problem.
             return Respons<AuthServiceReadDto>.Fail(TenantMismatchException.Code, e.Message, 401);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Bad signature, expired, malformed, or missing its claims. A 401 refusal like
+            // the Python package's, rather than an exception the app has to map: ZelosHR
+            // mapped it to 403, and the frontends sign somebody out only on a 401 -- so an
+            // expired token left people on a screen of errors instead of at sign-in.
+            return Respons<AuthServiceReadDto>.Fail(InvalidTokenCode, "Could not validate credentials", 401);
         }
 
         // A correctly signed token only proves Core Platform issued it. This asks whether
@@ -722,6 +733,15 @@ public sealed class AuthService : IAuthService
             return handler.ValidateToken(token, validationParameters, out _);
         }
         catch (SecurityTokenException ex)
+        {
+            throw new UnauthorizedAccessException("Could not validate credentials", ex);
+        }
+        // A token that is not a JWT at all ("x.y.z", a truncated paste) fails to PARSE
+        // before it can fail to validate, and the handler reports that as an
+        // ArgumentException ("IDX12729: Unable to decode the header"). Uncaught, the app's
+        // exception handler turned it into a 400 carrying the library's message. It is
+        // the same answer as a bad signature: not signed in.
+        catch (ArgumentException ex)
         {
             throw new UnauthorizedAccessException("Could not validate credentials", ex);
         }

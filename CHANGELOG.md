@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.14 (2026-10-15)
+
+**Every token that does not verify is a 401.** `AuthorizeUserFromTokenAsync` now
+returns `401 INVALID_TOKEN` ("Could not validate credentials") for a tampered,
+expired or malformed token, or one missing its claims, instead of throwing.
+ZelosHR mapped the exception to 403, and the suite's frontends sign somebody out
+only on a 401, so an expired token left people on a screen of errors. A token
+that is not a JWT at all (`x.y.z`) used to escape `ValidateToken` as an
+`ArgumentException` (IDX12729) and reach the browser as a 400 with the identity
+library's message; it is now caught with the rest. `DecodeToken` still throws
+`UnauthorizedAccessException`, as before.
+
 ## 1.0.13 (2026-10-15)
 
 **An ended session stops working.** Core Platform records sign-out, "end this

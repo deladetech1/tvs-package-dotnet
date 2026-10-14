@@ -151,3 +151,67 @@ public class SessionGuardTests
         Assert.Empty(fresh.Writes);
     }
 }
+
+/*
+A token that does not verify -- tampered, expired, or not a JWT at all -- is a 401
+refusal from AuthorizeUserFromTokenAsync, not an exception. A malformed one used to
+escape as an ArgumentException and reach the browser as a 400 with the identity
+library's message; ZelosHR turned the others into a 403.
+*/
+public class InvalidTokenTests
+{
+    private const string Secret = "invalid-token-test-secret-invalid-token-test";
+
+    private static AuthService Service() => new(
+        new ThrowingDb(),
+        Options.Create(new TrovesuiteOptions { Jwt = new JwtOptions { SecretKey = Secret } }),
+        NullLogger<AuthService>.Instance);
+
+    /// <summary>Never reached: every case here is refused before the database.</summary>
+    private sealed class ThrowingDb : IDatabaseManager
+    {
+        private static Exception Reached() => new InvalidOperationException("the database must not be reached");
+        public Task<IReadOnlyList<IDictionary<string, object?>>> ExecuteQueryAsync(string sql, object? p = null, CancellationToken c = default) => throw Reached();
+        public Task<IReadOnlyList<T>> ExecuteQueryAsync<T>(string sql, object? p = null, CancellationToken c = default) => throw Reached();
+        public Task<int> ExecuteUpdateAsync(string sql, object? p = null, CancellationToken c = default) => throw Reached();
+        public Task<object?> ExecuteScalarAsync(string sql, object? p = null, CancellationToken c = default) => throw Reached();
+        public Task<T?> ExecuteScalarAsync<T>(string sql, object? p = null, CancellationToken c = default) => throw Reached();
+        public Task<IDictionary<string, object?>> HealthCheckAsync(CancellationToken c = default) => throw Reached();
+    }
+
+    private static string Signed(string key, DateTime expires, bool withTenant = true)
+    {
+        var claims = new List<Claim> { new("user_id", "u1") };
+        if (withTenant) claims.Add(new Claim("tenant_id", "t1"));
+        var creds = new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key)), SecurityAlgorithms.HmacSha256);
+        return new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken(
+            claims: claims, notBefore: expires.AddHours(-2), expires: expires, signingCredentials: creds));
+    }
+
+    public static IEnumerable<object[]> BadTokens() => new[]
+    {
+        new object[] { "malformed", "x.y.z" },
+        new object[] { "not a token", "hello" },
+        new object[] { "empty", "" },
+        new object[] { "wrong secret", Signed("another-secret-another-secret-another-secret", DateTime.UtcNow.AddHours(1)) },
+        new object[] { "expired", Signed(Secret, DateTime.UtcNow.AddMinutes(-5)) },
+        new object[] { "no tenant", Signed(Secret, DateTime.UtcNow.AddHours(1), withTenant: false) },
+    };
+
+    [Theory]
+    [MemberData(nameof(BadTokens))]
+    public async Task IsA401Refusal(string _, string token)
+    {
+        var r = await Service().AuthorizeUserFromTokenAsync(token);
+        Assert.False(r.Success);
+        Assert.Equal(401, r.StatusCode);
+        Assert.Equal("INVALID_TOKEN", r.Error);
+        Assert.Equal("Could not validate credentials", r.Detail);
+    }
+
+    [Fact]
+    public void DecodeToken_StillThrowsUnauthorizedForAMalformedToken()
+    {
+        Assert.Throws<UnauthorizedAccessException>(() => Service().DecodeToken("x.y.z"));
+    }
+}
