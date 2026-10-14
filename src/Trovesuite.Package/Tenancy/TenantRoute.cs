@@ -6,6 +6,11 @@ public static class TenantTier
     public const string Pooled = "POOLED";
     public const string SiloShared = "SILO_SHARED";
     public const string SiloDedicated = "SILO_DEDICATED";
+    /// <summary>
+    /// A silo on the client's own infrastructure. Its data is as separate from the pool
+    /// as any other silo's, which is all <see cref="TenantRoute.HasOwnDatabase"/> asks.
+    /// </summary>
+    public const string SiloByod = "SILO_BYOD";
     public const string SelfManaged = "SELF_MANAGED";
 }
 
@@ -89,8 +94,15 @@ public sealed record TenantRoute
     /// column, because the database refuses to store a silo row without one
     /// (ck_ctl_routes_silo_has_db).
     /// </summary>
+    /// <remarks>
+    /// THE MOST DANGEROUS LINE IN THE PACKAGE. A silo tier missing here does not fail:
+    /// the route answers false and the request quietly runs against the POOLED database,
+    /// one client's data served out of the shared one. SILO_BYOD was missing (migration
+    /// 20261007-06 added the tier; the Python and Go packages were updated, this was not).
+    /// A tier added to ck_ctl_tenant_routes_tier must be added here in the same change.
+    /// </remarks>
     public bool HasOwnDatabase =>
-        Tier is TenantTier.SiloShared or TenantTier.SiloDedicated;
+        Tier is TenantTier.SiloShared or TenantTier.SiloDedicated or TenantTier.SiloByod;
 
     /// <summary>
     /// Whether the address itself names one tenant. False only for the apex;

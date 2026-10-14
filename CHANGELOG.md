@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.12 (2026-10-15)
+
+Two tenancy security fixes.
+
+- **`SILO_BYOD` has its own database.** `TenantRoute.HasOwnDatabase` listed only
+  `SILO_SHARED` and `SILO_DEDICATED`. Migration `20261007-06` added the
+  `SILO_BYOD` tier and warned that adding it without updating the packages "is
+  the dangerous half"; `trovesuite` and `tvs-package-go` were updated, this was
+  not. A BYOD client's requests were therefore served from the POOLED database
+  instead of their own, the Unknown Origin failure again. They now go to the
+  client's database, or fail closed.
+- **A token for one tenant is refused at an address that names another.**
+  `IsPinnedToTenant` documented the rule and nothing enforced it. `DecodeToken`
+  throws `TenantMismatchException` (an `UnauthorizedAccessException`), and
+  `AuthorizeUserFromTokenAsync` answers `401 TENANT_MISMATCH` with a sentence the
+  person can act on. Only a route with a `TenantId` decides anything.
+  `TENANCY_PIN_TOKENS=false` switches it off, as an escape hatch only. Same rule
+  as `trovesuite` 1.0.62 and `tvs-package-go`.
+
 ## 1.0.10 (2026-10-02)
 
 `Tenancy/TenantStorage` — storage follows the route, mirroring `trovesuite`

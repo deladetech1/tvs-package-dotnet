@@ -7,6 +7,7 @@ using Microsoft.IdentityModel.Tokens;
 using Trovesuite.Package.Configuration;
 using Trovesuite.Package.Database;
 using Trovesuite.Package.Entities;
+using Trovesuite.Package.Tenancy;
 
 namespace Trovesuite.Package.Auth;
 
@@ -82,6 +83,8 @@ public sealed class AuthService : IAuthService
         if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(tenantId))
             throw new UnauthorizedAccessException("Could not validate credentials");
 
+        CheckAddressTenant(tenantId);
+
         return new Dictionary<string, string?>
         {
             ["user_id"] = userId,
@@ -91,9 +94,47 @@ public sealed class AuthService : IAuthService
 
     public IDictionary<string, string?> GetUserInfoFromToken(string token) => DecodeToken(token);
 
+    /// <summary>
+    /// Refuse a token for one tenant presented at an address that names another.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TenantRoute.IsPinnedToTenant"/> has always said "a token for a different
+    /// tenant arriving at a pinned address is a 401", and nothing enforced it: tenant A's
+    /// token sent from tenant B's address was authorised against B's route, as A. Only a
+    /// pinned address decides anything -- the apex, an app's own address and a wildcard
+    /// parent carry no tenant and leave the token to say which. No route in scope is
+    /// unchanged. TENANCY_PIN_TOKENS=false switches it off, as an escape hatch only. The
+    /// same rule is in the Python and Go packages.
+    /// </remarks>
+    private void CheckAddressTenant(string tenantId)
+    {
+        var flag = Environment.GetEnvironmentVariable("TENANCY_PIN_TOKENS")?.Trim().ToLowerInvariant();
+        if (flag is "0" or "false" or "no" or "off") return;
+
+        var route = TenantContext.Current;
+        if (route is null || !route.IsPinnedToTenant) return;
+        if (string.Equals(route.TenantId, tenantId, StringComparison.Ordinal)) return;
+
+        _logger.LogWarning(
+            "Refusing a token for tenant {TokenTenant} at {Host}, which belongs to tenant {RouteTenant}",
+            tenantId, route.RequestedHost ?? route.Host, route.TenantId);
+        throw new TenantMismatchException();
+    }
+
     public async Task<Respons<AuthServiceReadDto>> AuthorizeUserFromTokenAsync(string token, CancellationToken cancellationToken = default)
     {
-        var info = DecodeToken(token);
+        IDictionary<string, string?> info;
+        try
+        {
+            info = DecodeToken(token);
+        }
+        catch (TenantMismatchException e)
+        {
+            // A refusal with its own status and code, not the bare exception: callers
+            // map an exception to "could not validate credentials", which sends somebody
+            // to reset a password that was never the problem.
+            return Respons<AuthServiceReadDto>.Fail(TenantMismatchException.Code, e.Message, 401);
+        }
         var data = new AuthServiceWriteDto
         {
             UserId = info["user_id"],
