@@ -104,6 +104,7 @@ public sealed class CorePlatformTableOptions
 
     public string Groups { get; set; } = "core_platform.cp_groups";
     public string LoginSettings { get; set; } = "core_platform.cp_login_settings";
+    public string UserSessions { get; set; } = "core_platform.cp_user_sessions";
     public string Resources { get; set; } = "core_platform.cp_resources";
     public string AssignRoles { get; set; } = "core_platform.cp_assign_roles";
     public string ResourceDeletionChatHistories { get; set; } = "core_platform.cp_resource_deletion_chat_histories";

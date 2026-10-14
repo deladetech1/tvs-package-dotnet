@@ -15,6 +15,9 @@ public sealed class AuthService : IAuthService
 {
     private const string SystemTenantId = "system-tenant-id";
 
+    /// <summary>The error code of a refusal for a session that has been ended.</summary>
+    public const string SessionRevokedCode = "SESSION_REVOKED";
+
     private readonly IDatabaseManager _db;
     private readonly TrovesuiteOptions _options;
     private readonly ILogger<AuthService> _logger;
@@ -89,6 +92,10 @@ public sealed class AuthService : IAuthService
         {
             ["user_id"] = userId,
             ["tenant_id"] = tenantId,
+            // The session id, when the token has one. Carried so the caller can ask
+            // whether this exact session has been ended (see SessionGuard).
+            ["jti"] = principal.FindFirst("jti")?.Value
+                ?? principal.FindFirst(JwtRegisteredClaimNames.Jti)?.Value,
         };
     }
 
@@ -135,6 +142,16 @@ public sealed class AuthService : IAuthService
             // to reset a password that was never the problem.
             return Respons<AuthServiceReadDto>.Fail(TenantMismatchException.Code, e.Message, 401);
         }
+
+        // A correctly signed token only proves Core Platform issued it. This asks whether
+        // it still counts -- whether somebody has since ended the session, here or in any
+        // other app. 401 with the reason, as in the Python package, rather than "could not
+        // validate credentials".
+        var revoked = await new SessionGuard(_db, _logger, _options.Tables.UserSessions)
+            .RevokedMessageAsync(info.TryGetValue("jti", out var jti) ? jti : null, cancellationToken)
+            .ConfigureAwait(false);
+        if (revoked is not null)
+            return Respons<AuthServiceReadDto>.Fail(SessionRevokedCode, revoked, 401);
         var data = new AuthServiceWriteDto
         {
             UserId = info["user_id"],

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.13 (2026-10-15)
+
+**An ended session stops working.** Core Platform records sign-out, "end this
+session", "sign out everywhere", an organisation lockdown and a password change in
+`cp_user_sessions`, and `trovesuite` refuses those tokens on every request. This
+package never read the table, so ZelosHR kept an ended session working until the
+token expired, up to a day.
+
+`AuthorizeUserFromTokenAsync` now asks `SessionGuard` (a port of `session_guard`)
+and answers `401 SESSION_REVOKED` with the reason in words. As in Python, a token
+with no `jti`, a `jti` with no row, and a database failure are all accepted on
+purpose. `last_seen_at` is refreshed at most every five minutes. `DecodeToken` now
+also returns the token's `jti`. New option: `Tables.UserSessions`.
+
 ## 1.0.12 (2026-10-15)
 
 Two tenancy security fixes.
