@@ -130,6 +130,39 @@ public sealed class TenantContextMiddleware
             }
         }
 
+        // A shared app frontend (one address for every tenant) resolves to a route
+        // that names no tenant, so it cannot say whose data the page wants. When
+        // that is the Origin's answer and X-Tenant-Host is present, the header
+        // decides: a TENANT route wins; anything else is a 404, never the pool.
+        // Nothing new is reachable -- the header alone (no Origin) has always
+        // resolved first -- and the pinned-address token check then holds every
+        // authenticated request to that tenant. Same rule as trovesuite 1.0.63.
+        if (route is not null && signal == "origin" && !route.IsPinnedToTenant)
+        {
+            var claimed = First(context.Request, "X-Tenant-Host");
+            if (claimed.Length > 0)
+            {
+                var tenantRoute = await _resolver.ResolveAsync(claimed, context.RequestAborted)
+                                                 .ConfigureAwait(false);
+                if (tenantRoute is not null && tenantRoute.IsPinnedToTenant)
+                {
+                    _logger.LogDebug(
+                        "Origin {Origin} names no tenant; X-Tenant-Host {Claimed} does ({Tier})",
+                        host, claimed, tenantRoute.Tier);
+                    route = tenantRoute;
+                    signal = "x-tenant-host";
+                    host = claimed;
+                }
+                else
+                {
+                    route = null;
+                    signal = null;
+                    unknownTenantSignal = "x-tenant-host";
+                    host = claimed;
+                }
+            }
+        }
+
         // Recorded whether or not anything resolved, so a later complaint about
         // having no tenant can say WHY: a request that offered nothing usable is a
         // different fault from a timer that never had a request at all.

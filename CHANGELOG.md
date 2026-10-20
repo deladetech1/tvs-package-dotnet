@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.15 (2026-10-20)
+
+**A silo tenant on a shared app frontend reaches its own database.** When the
+Origin resolves to a route that names no tenant (an app frontend served from one
+address for every tenant) and `X-Tenant-Host` is present, the header decides: a
+TENANT route wins; an unknown host or one naming no tenant is a 404, never the
+pool. A tenant Origin is never overridden; header-less requests are unchanged.
+The pinned-address check (1.0.12) holds authenticated requests to that tenant.
+Same rule as trovesuite 1.0.63. Tests: `SharedFrontendTenantHostTests`.
+
 ## 1.0.14 (2026-10-15)
 
 **Every token that does not verify is a 401.** `AuthorizeUserFromTokenAsync` now
