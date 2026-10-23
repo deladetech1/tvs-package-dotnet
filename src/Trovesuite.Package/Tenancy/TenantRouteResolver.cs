@@ -30,6 +30,17 @@ namespace Trovesuite.Package.Tenancy;
 /// nothing routes on the result yet; the moment something does,
 /// <see cref="TenancyOptions.Enforce"/> turns an unresolved host into a refusal
 /// rather than a shrug.</para>
+///
+/// <para><b>Any OTHER failure is not "unknown host".</b> It throws
+/// <see cref="TenantRouteLookupException"/> and is never cached. Until 1.0.16
+/// every failure came back as null — "nobody registered this address" — so when
+/// the dev database server went away for Azure maintenance on 2026-10-23, every
+/// app answered every address with 404 "This address is not configured". The
+/// middleware turns the exception into a 503 with <c>Retry-After</c>: still
+/// closed, but true. Only "the table or its schema does not exist" (42P01 /
+/// 3F000) keeps the old "unresolved" meaning; a permission error is a fault.
+/// There is no stale-on-error fallback: a cached hit is served until its TTL and
+/// no longer.</para>
 /// </remarks>
 public sealed class TenantRouteResolver : ITenantRouteResolver
 {
@@ -126,6 +137,8 @@ public sealed class TenantRouteResolver : ITenantRouteResolver
         if (_cache.TryGetValue(key, out var cached) && cached.ExpiresAt > now)
             return cached.Route;
 
+        // Throws TenantRouteLookupException on a failed read, which skips the
+        // cache write below: a failure is never remembered as a miss.
         var route = await FetchAsync(key, cancellationToken).ConfigureAwait(false);
 
         var ttl = route is not null
@@ -203,19 +216,30 @@ public sealed class TenantRouteResolver : ITenantRouteResolver
                 return rows.Count == 0 ? null : ToRoute(rows[0], host);
             }
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // The caller went away; there is nobody to answer.
+            throw;
+        }
+        catch (Npgsql.PostgresException ex) when (ex.SqlState is "42P01" or "3F000")
         {
             if (Interlocked.Exchange(ref _tableMissingLogged, 1) == 0)
             {
                 _logger.LogWarning(
                     ex,
-                    "Tenant route lookup failed. Treating every host as unresolved. " +
-                    "If the control-plane migration has not been applied yet, or this " +
-                    "app's database role has no USAGE on {Table}'s schema, this is " +
-                    "expected; once both are in place, it is a fault.",
+                    "Tenant route table {Table} does not exist. Treating every host as " +
+                    "unresolved. Expected before the control-plane migration has been " +
+                    "applied; a fault afterwards.",
                     _options.RoutesTable);
             }
             return null;
+        }
+        catch (Exception ex)
+        {
+            // Unreachable, timed out, refused, pool exhausted: we do not KNOW
+            // whether this host is registered, so do not say it is not.
+            throw new TenantRouteLookupException(
+                $"Tenant route lookup failed for '{host}': {ex.GetType().Name}: {ex.Message}", ex);
         }
     }
 
@@ -255,4 +279,20 @@ public sealed class TenantRouteResolver : ITenantRouteResolver
             : null;
 
     private readonly record struct CacheEntry(TenantRoute? Route, DateTime ExpiresAt);
+}
+
+/// <summary>
+/// The route table could not be READ — not "the host is not in it".
+/// </summary>
+/// <remarks>
+/// Thrown by <see cref="TenantRouteResolver.ResolveAsync"/> when the database is
+/// unreachable, times out, refuses the role, or anything else goes wrong other
+/// than the table not existing. <see cref="TenantContextMiddleware"/> answers 503
+/// with <c>Retry-After</c>; it must never be read as "unknown host" nor as a
+/// reason to fall back to another signal or the pool.
+/// </remarks>
+public sealed class TenantRouteLookupException : Exception
+{
+    public TenantRouteLookupException(string message, Exception? inner = null)
+        : base(message, inner) { }
 }

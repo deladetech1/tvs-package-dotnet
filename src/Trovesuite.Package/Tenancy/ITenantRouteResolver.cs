@@ -4,6 +4,10 @@ namespace Trovesuite.Package.Tenancy;
 public interface ITenantRouteResolver
 {
     /// <summary>The route for <paramref name="host"/>, or null if no row claims it.</summary>
+    /// <exception cref="TenantRouteLookupException">
+    /// The route table could not be read (database unreachable, timeout, permission).
+    /// Never cached, and never to be treated as "no row claims it".
+    /// </exception>
     Task<TenantRoute?> ResolveAsync(string? host, CancellationToken cancellationToken = default);
 
     /// <summary>Drop cached answers — one host, or all of them when null.</summary>

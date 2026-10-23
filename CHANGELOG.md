@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.16 (2026-10-23)
+
+**A failed route lookup is a 503, not "This address is not configured".** The
+resolver returned null for every failure, so when the dev database server was
+briefly unreachable (2026-10-23) every app answered every address with 404 "This
+address is not configured". `TenantRouteResolver.ResolveAsync` now throws
+`TenantRouteLookupException` (never cached) for anything other than a missing
+table/schema (42P01 / 3F000, unchanged); a permission error is a fault. The
+middleware answers **503** with `Retry-After: 30`, envelope
+`error: "service_unavailable"`, detail "Service temporarily unavailable — please
+try again shortly.", and logs it. Still fail-closed: refused in exactly the cases
+an unknown host would be, never falls back to Host or the pool. No stale-on-error
+fallback. Same change as trovesuite 1.0.65 / tvs-package-go v0.1.5. Tests:
+`RouteLookupFailureTests`. A custom `ITenantRouteResolver` may now throw
+`TenantRouteLookupException` to get the same answer.
+
 ## 1.0.15 (2026-10-20)
 
 **A silo tenant on a shared app frontend reaches its own database.** When the

@@ -81,6 +81,23 @@ public sealed class TenantContextMiddleware
     /// </summary>
     public const string SignalItemKey = "tenant_route_signal";
 
+    /// <summary>
+    /// What a caller is told when the route table could not be read at all.
+    /// </summary>
+    /// <remarks>
+    /// NOT the 404 for an unknown address: on 2026-10-23 a database blip made
+    /// every app say "This address is not configured" for every address. Kept
+    /// identical in trovesuite and tvs-package-go; the frontends match on
+    /// <see cref="UnavailableError"/>.
+    /// </remarks>
+    public const string UnavailableDetail = "Service temporarily unavailable \u2014 please try again shortly.";
+
+    /// <summary>The envelope's <c>error</c> for <see cref="UnavailableDetail"/>.</summary>
+    public const string UnavailableError = "service_unavailable";
+
+    /// <summary>Seconds, sent as <c>Retry-After</c> with <see cref="UnavailableDetail"/>.</summary>
+    public const int UnavailableRetryAfterSeconds = 30;
+
     public TenantContextMiddleware(
         RequestDelegate next,
         ITenantRouteResolver resolver,
@@ -110,10 +127,29 @@ public sealed class TenantContextMiddleware
         // answer a question nobody asked.
         string? unknownTenantSignal = null;
 
+        // Set when the route table could not be READ. Not "unknown": we do not
+        // know, so the search stops here too (falling through to Host would
+        // serve the pool to a request we could not place) and the answer is a
+        // 503, never the 404 for an unregistered address.
+        TenantRouteLookupException? lookupFailure = null;
+        string? lookupFailedSignal = null;
+
         foreach (var (candidateSignal, candidate) in candidates)
         {
-            var found = await _resolver.ResolveAsync(candidate, context.RequestAborted)
+            TenantRoute? found;
+            try
+            {
+                found = await _resolver.ResolveAsync(candidate, context.RequestAborted)
                                        .ConfigureAwait(false);
+            }
+            catch (TenantRouteLookupException ex)
+            {
+                lookupFailure = ex;
+                lookupFailedSignal = candidateSignal;
+                host = candidate;
+                break;
+            }
+
             if (found is not null)
             {
                 route = found;
@@ -142,9 +178,25 @@ public sealed class TenantContextMiddleware
             var claimed = First(context.Request, "X-Tenant-Host");
             if (claimed.Length > 0)
             {
-                var tenantRoute = await _resolver.ResolveAsync(claimed, context.RequestAborted)
+                TenantRoute? tenantRoute = null;
+                try
+                {
+                    tenantRoute = await _resolver.ResolveAsync(claimed, context.RequestAborted)
                                                  .ConfigureAwait(false);
-                if (tenantRoute is not null && tenantRoute.IsPinnedToTenant)
+                }
+                catch (TenantRouteLookupException ex)
+                {
+                    lookupFailure = ex;
+                    lookupFailedSignal = "x-tenant-host";
+                }
+
+                if (lookupFailure is not null)
+                {
+                    route = null;
+                    signal = null;
+                    host = claimed;
+                }
+                else if (tenantRoute is not null && tenantRoute.IsPinnedToTenant)
                 {
                     _logger.LogDebug(
                         "Origin {Origin} names no tenant; X-Tenant-Host {Claimed} does ({Tier})",
@@ -176,6 +228,22 @@ public sealed class TenantContextMiddleware
             () => context.GetEndpoint()?.DisplayName);
 
         var enforce = _options.Enforce && !exempt;
+
+        if (route is null && lookupFailure is not null
+            && (enforce || TenantClaimSignals.Contains(lookupFailedSignal!)))
+        {
+            // Fail CLOSED, but say the true thing: the service is briefly
+            // unwell, not the address unknown. Refused in exactly the cases an
+            // unknown host would have been, so a failed lookup never serves
+            // more than an unknown host would.
+            _logger.LogWarning(lookupFailure,
+                "Tenant route lookup failed for host {Host} (signal={Signal}); answering 503",
+                host, lookupFailedSignal);
+            context.Response.Headers["Retry-After"] =
+                UnavailableRetryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            await RefuseAsync(context, 503, UnavailableDetail, UnavailableError).ConfigureAwait(false);
+            return;
+        }
 
         if (route is null)
         {
@@ -315,7 +383,8 @@ public sealed class TenantContextMiddleware
     /// refusal here surfaces the same way as one from any endpoint instead of as an
     /// unrecognised shape the client renders as "undefined".
     /// </remarks>
-    private static async Task RefuseAsync(HttpContext context, int status, string detail)
+    private static async Task RefuseAsync(
+        HttpContext context, int status, string detail, string? error = null)
     {
         var body = JsonSerializer.SerializeToUtf8Bytes(new
         {
@@ -323,7 +392,7 @@ public sealed class TenantContextMiddleware
             data = Array.Empty<object>(),
             success = false,
             status_code = status,
-            error = (string?)null,
+            error,
         });
 
         context.Response.StatusCode = status;
